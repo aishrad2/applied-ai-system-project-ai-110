@@ -13,3 +13,8 @@ venv/
 
 # Pytest cache
 .pytest_cache/
+
+# Local credentials and generated output
+.env
+logs/
+playlist.csv

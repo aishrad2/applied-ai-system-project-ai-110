@@ -1,0 +1,45 @@
+flowchart TD
+    U["User"] --> Q["Four-question quiz + notes"]
+    Q --> S["Sanitize and validate input"]
+    S --> C{"Conflicting preferences?"}
+    C -->|yes| CL["Ask user which input wins"]
+    CL --> S
+    C -->|no| P["Build taste profile"]
+
+    S --> G["Gemini API: parse notes (required for interactive agent)"]
+    G -->|success| P
+    G -->|request failure| KW["Allowlisted keyword parser"]
+    KW --> P
+
+    CAT["Local song CSV"] --> LD["Normalize fields; derive mood/era; merge manual language labels"]
+    LD --> SC["Deterministic weighted scorer"]
+    P --> AG["Playlist agent / retry controller"]
+    AG --> SC
+    SC --> AG
+    AG --> V{"Python verifier"}
+    V -->|pass| E["Gemini explainer"]
+    V -->|fail; fewer than 3 attempts| AG
+    V -->|still fails after 3 attempts| BF["Show closest playlist + issues"]
+    BF --> E
+    E -->|error| TE["Template explanation fallback"]
+    E --> H["Human approval"]
+    TE --> H
+    H -->|decline| STOP["Exit without exporting"]
+    H -->|approve| CSV["CSV-safe playlist.csv + Spotify search links"]
+    CSV --> SP{"Spotify export requested?"}
+    SP -->|no| DONE["Done"]
+    SP -->|yes| O["Spotify OAuth PKCE"]
+    O -->|success| API["Create private playlist and add tracks"]
+    O -->|error| FB["Log failure; keep approved CSV"]
+    API --> DONE
+    FB --> DONE
+
+    S -.-> LOG["logs/run.log"]
+    P -.-> LOG
+    AG -.-> LOG
+    V -.-> LOG
+    CSV -.-> LOG
+    O -.-> LOG
+
+    T["Reliability tester"] -.->|fixed profiles; no Gemini or Spotify calls| AG
+    T --> RT["Pass-rate and repeatability table"]
