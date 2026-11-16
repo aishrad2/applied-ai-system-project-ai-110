@@ -127,3 +127,10 @@ Prompts:
 - How this changed the way you think about music recommendation apps
 
  I learned that a recommender's choices about features and weights shape what it calls similar. It was interesting how changing the profile changes the recommended songs. Music apps also depend on their data and scoring rules, even when their suggestions seem personal.
+
+AI Reflection:
+brainstormed w AI
+overrode decisions in brainstorming
+talked about architectural and design decisions
+inputted my own things like database to combat costs of dev w APIs
+weighed out pros and cons

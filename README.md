@@ -1,213 +1,152 @@
-# 🎵 Music Recommender Simulation
+# Playlist Pilot
 
-## Project Summary
+## Original Project
 
-In this project you will build and explain a small music recommender system.
+This builds on my Music Recommender Simulation. The original loaded a small song catalog and a user profile (genre, mood, energy, tempo and a few other tastes), scored every song with a weighted formula, and ranked them with a short reason for each match. It was a teaching demo, and some of the recommender methods were still placeholders (more details in OLD_README.md).
 
-Your goal is to:
+## Title and Summary
 
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
+Playlist Pilot builds a playlist from a short quiz.
 
-Replace this paragraph with your own summary of what your version does.
+I listen to music from different languages and cultures, and I split my playlists by mood and time period. Spotify makes that hard, and finding songs for a specific mood is even harder. So you answer 4 questions, add optional notes, and the system builds a playlist, checks its own work, and exports it.
 
----
+## Architecture Overview
 
-## How The System Works
+The full diagram is in [diagrams/architecture.mmd](diagrams/architecture.mmd). The flow is:
 
-For each song, compare its attributes with the user's preferences and calculate a score from 0 to 100. Higher scores indicate a closer match.
+- The four quiz answers and notes are sanitized and turned into a profile
+- Gemini interprets the notes; an allowlisted keyword parser is used if Gemini fails
+- A validator checks the profile and asks the user which preference wins when inputs conflict
+- The agent asks the deterministic scorer to rank songs from the catalog
+- A verifier checks catalog membership, labelled language and era, duplicate tracks, and playlist length
+- If a check fails, the agent swaps songs and tries again, up to 3 times
+- After 3 failed tries it stops and shows the closest playlist and what went wrong
+- Gemini writes the playlist name and reasons using only the verified scores; a template is used if explanation generation fails
+- I approve the playlist before anything is exported
+- Every step is logged, and a separate tester runs fixed profiles through the same pipeline
 
-### Proposed scoring rule
+The normal interactive agent requires a Gemini API key. Gemini interprets notes and explains results, but never chooses or ranks songs: the scorer, verifier, retry loop, and export checks are Python code.
 
-Use these weights:
+## Setup Instructions
 
-| Feature | Weight |
-|---|---:|
-| Genre | 0.30 |
-| Mood | 0.25 |
-| Energy | 0.15 |
-| Tempo | 0.10 |
-| Valence | 0.06 |
-| Danceability | 0.06 |
-| Acousticness | 0.06 |
-| Artist | 0.02 |
+Python 3.10 or newer is required. The interactive AI agent requires a Gemini API key from Google AI Studio. Add it to the ignored local `.env` file:
 
-For genre, mood, and artist, the feature similarity is `1` for an exact match and `0` otherwise. For energy, valence, danceability, and acousticness (each already on a 0–1 scale), use:
-
-```text
-similarity = 1 - abs(song_value - preferred_value)
+```
+GEMINI_API_KEY=your_google_ai_studio_key
+GEMINI_MODEL=gemini-2.5-flash
 ```
 
-For tempo, convert the BPM difference into a 0–1 similarity using a 160 BPM reference range:
+The `.env` file is git-ignored; never commit or share the key. Notes are sent to Gemini when interpreted, and selected song metadata and score reasons are sent when Gemini writes the explanation; do not include sensitive information. Google AI Studio quotas and billing depend on the account and model, so check the current terms before use.
 
-```text
-similarity = max(0, 1 - abs(song_tempo_bpm - preferred_tempo_bpm) / 160)
+Install dependencies and run the agent from the repository root:
+
+```
+python -m venv .venv
 ```
 
-Then calculate:
+On Windows:
 
-```text
-score = 100 * sum(weight * similarity) / sum(weights for preferences provided)
 ```
-
-Only include features for which the user has provided a preference in the sums, so missing preferences do not lower a song's score. Rank songs by score, highest first. Artist has only a small influence, while genre and mood together account for more than half of the score.
-
-I opted for these rules because based on my research and personal thoughts, genre and mood should be the biggest contributors to the score. Then energy and tempo matter, but not as much as genre and mood. The rest of the factors come below this. Artist is below all because it could too heavily skew the results especially with a small data set.
-
----
-
-## Getting Started
-
-### Setup
-
-1. Create a virtual environment (optional but recommended):
-
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
-
-2. Install dependencies
-
-```bash
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-3. Run the app:
-
-```bash
 python -m src.main
 ```
 
-### Running Tests
-
-Run the starter tests with:
-
-```bash
-pytest
-```
-
-You can add more tests in `tests/test_recommender.py`.
-
----
-
-## Sample Recommendation Output
-
-Paste a sample of your recommender's output here as a text block so a reader can see what it produces:
+On macOS or Linux:
 
 ```
-Loaded songs: 20
-
-Top recommendations
-====================
-
-1. Sunrise City  |  Score: 99.57/100
-   Reasons:
-   - genre match (+42.9)
-   - mood match (+35.7)
-   - energy similarity (+21.0)
-
-2. Gym Hero  |  Score: 61.50/100
-   Reasons:
-   - genre match (+42.9)
-   - mood mismatch (+0.0)
-   - energy similarity (+18.6)
-
-3. Rooftop Lights  |  Score: 56.29/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood match (+35.7)
-   - energy similarity (+20.6)
-
-4. Sunday Steps  |  Score: 21.21/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood mismatch (+0.0)
-   - energy similarity (+21.2)
-
-5. Midnight Carnival  |  Score: 20.79/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood mismatch (+0.0)
-   - energy similarity (+20.8)
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m src.main
 ```
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or demo video link here -->
+The app uses `data/spotify_songs.csv` when present, otherwise `data/songs.csv`.
+To select a catalog explicitly, pass `--csv path/to/catalog.csv`.
 
----
-
-## Experiments You Tried
-
-Use this section to document the experiments you ran. For example:
-
-- What happened when you changed the weight on genre from 2.0 to 0.5
-- What happened when you added tempo or valence to the score
-- How did your system behave for different types of users
+To run the recommender with the downloaded Spotify CSV instead of the small sample catalog:
 
 ```
-Loaded songs: 20
-
-Top recommendations
-====================
-
-1. Sunrise City  |  Score: 99.57/100
-   Reasons:
-   - genre match (+42.9)
-   - mood match (+35.7)
-   - energy similarity (+21.0)
-
-2. Gym Hero  |  Score: 61.50/100
-   Reasons:
-   - genre match (+42.9)
-   - mood mismatch (+0.0)
-   - energy similarity (+18.6)
-
-3. Rooftop Lights  |  Score: 56.29/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood match (+35.7)
-   - energy similarity (+20.6)
-
-4. Sunday Steps  |  Score: 21.21/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood mismatch (+0.0)
-   - energy similarity (+21.2)
-
-5. Midnight Carnival  |  Score: 20.79/100
-   Reasons:
-   - genre mismatch (+0.0)
-   - mood mismatch (+0.0)
-   - energy similarity (+20.8)
+python -m src.main --csv data/spotify_songs.csv
 ```
 
----
+Mood is derived from energy and valence, and era is derived from the release date. The Spotify dataset does not include song-language labels. To request language-specific playlists, create `data/language_labels.csv` with `track_id,language` columns and pass `--language-labels data/language_labels.csv`; unknown languages are never presented as verified matches.
 
-## Limitations and Risks
+To run the tests:
 
-Summarize some limitations of your recommender.
+```
+python -m pytest
+```
 
-Examples:
+The fixed-profile reliability test runs without Gemini or Spotify:
 
-- It only works on a tiny catalog
-- It does not understand lyrics or language
-- It might over favor one genre or mood
+```
+python -m src.main --self-test
+```
 
-You will go deeper on this in your model card.
+Spotify playlist creation is an optional export destination, but requires a Spotify developer app. Set `SPOTIFY_CLIENT_ID` in `.env`, register the exact loopback URI `http://127.0.0.1:8888/callback` in the Spotify app settings, then run:
 
----
+```
+python -m src.main --export spotify
+```
 
-## Reflection
+Nothing is exported until you approve the proposed playlist. The approved `playlist.csv` is saved first; if Spotify export fails, it remains available with Spotify search links. Spotify account and API eligibility requirements may apply.
 
-Read and complete `model_card.md`:
+Logs are written to logs/run.log.
 
-[**Model Card**](model_card.md)
+## Sample Interactions
 
-Write 1 to 2 paragraphs here about what you learned:
+Example 1: normal request
 
-- about how recommenders turn data into predictions
-- about where bias or unfairness could show up in systems like this
+Input: language Spanish, mood nostalgic, era 2010s, setting late night drive. Notes: nothing too slow.
 
+Output: [paste real output from your run]
+
+Example 2: notes box
+
+Input: language Hindi, mood chill, era 2000s, setting studying. Notes: no loud songs, mostly acoustic.
+
+Output: [paste real output from your run]
+
+Example 3: conflicting input
+
+Input: language English, mood calm, era any, setting workout. Notes: keep it hype.
+
+Output: [paste real output from your run, should show the clarifying question]
+
+## Design Decisions
+
+Scorer stays deterministic. I wanted every song in a playlist to trace back to a score I can explain, so the LLM does not pick songs.
+
+Local catalog instead of live Spotify recommendations. The system uses the downloaded Spotify metadata/audio-feature catalog (28,356 unique tracks after duplicate removal) and does not rely on Spotify's recommendation endpoint.
+
+Mood and era are derived when the source has no labels. Era comes from the release date. Mood uses four simple energy/valence quadrants.
+
+Language is not inferred. The dataset has no language column; users can supply a manually labelled `track_id,language` CSV. Language-constrained requests are verified, and missing labels are reported rather than guessed.
+
+Spotify export is optional. The default destination is a CSV plus search links; Spotify authorization is requested only after the user approves the playlist.
+
+Stops after 3 tries. I would rather show the closest playlist and say what failed than quietly return something wrong.
+
+Human approval before export. Nothing is exported until I say yes.
+
+Trade-offs:
+
+- The catalog is small, so some language and mood combinations have few songs
+- Hand labeling takes time and can be wrong
+- Four mood quadrants are simple and miss a lot of nuance
+- The keyword fallback is less flexible than the LLM parser
+
+## Testing Summary
+
+The test suite has 26 passing tests covering scoring, Spotify CSV normalization, Gemini request formatting and key requirements, input conflicts, retries, language verification, deterministic runs, approval-gated export, and CSV formula-injection protection.
+
+The fixed-profile reliability run (`python -m src.main --self-test --csv data/spotify_songs.csv`) produced:
+
+| Measure | Result |
+|---|---:|
+| Profiles run | 4 |
+| Verifier pass rate | 4/4 |
+| Repeatability | 4/4 |
+
+Language-specific playlists cannot be verified against the downloaded catalog until language labels are provided. Gemini and Spotify network calls are isolated behind integrations and were not exercised with live credentials in the automated tests.
 
