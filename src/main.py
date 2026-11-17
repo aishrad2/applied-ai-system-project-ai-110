@@ -1,228 +1,183 @@
-"""Interactive Playlist Pilot CLI."""
-
-import argparse
 import logging
 from pathlib import Path
-from typing import Dict, Iterable, Optional
 
-from .integrations import (
-    LLMError,
-    SpotifyExportError,
-    load_dotenv,
-    llm_note_preferences,
-    make_llm_client,
-    make_spotify_exporter,
+import streamlit as st
+
+from src.catalog import genre_vocabulary, load_catalog
+from src.export import csv_bytes, export_spotify
+from src.playlist import build_playlist
+from src.profile import (
+    FOLLOWUP_CHOICES,
+    build_profile,
+    fill_defaults,
+    parse_confidence,
+    resolve_followup,
+    sanitize,
 )
-from .playlist_agent import (
-    MOODS,
-    SETTINGS,
-    PlaylistAgent,
-    PlaylistRequest,
-    configure_logging,
-    explain_playlist,
-    export_csv,
-    find_conflicts,
-    fixed_profile_tests,
-    format_test_results,
-    parse_notes_keywords,
-    sanitize_text,
-)
-from .recommender import load_songs
 
 
-def _ask_choice(prompt: str, options: Iterable[str], default: str) -> str:
-    allowed = [option for option in options]
-    while True:
-        answer = input(f"{prompt} ({'/'.join(allowed)}) [{default}]: ").strip()
-        if not answer:
-            return default
-        normalized = answer.casefold()
-        if normalized in {option.casefold() for option in allowed}:
-            return normalized
-        print(f"Choose one of: {', '.join(allowed)}")
+@st.cache_data(show_spinner=False)
+def _catalog():
+    return load_catalog("data/billboard_hot_100_spotify_audio_features_enriched.csv")
 
 
-def _collect_request(songs, count: int) -> PlaylistRequest:
-    languages = sorted(
-        {song["language"].casefold() for song in songs if song.get("language")}
-    )
-    eras = sorted({song["era"] for song in songs if song.get("era")})
-    print("\nPlaylist Pilot — describe the playlist you want.")
-    if languages:
-        print(f"Catalog language labels: {', '.join(languages)}")
-    else:
-        print("This catalog has no language labels; choose 'any' for unfiltered results.")
-    mood = _ask_choice("Mood", MOODS, "happy")
-    language_options = ["any"] + languages
-    language = _ask_choice("Language", language_options, "any")
-    era = _ask_choice("Era", ["any"] + eras, "any")
-    setting = _ask_choice("Setting", SETTINGS, "commute")
-    raw_notes = input("Optional notes (max 500 characters): ")
-    if len(raw_notes) > 500:
-        raise ValueError("Notes must be 500 characters or fewer.")
-    notes = sanitize_text(raw_notes)
-    return PlaylistRequest(
-        mood=mood,
-        language=language,
-        era=era,
-        setting=setting,
-        notes=notes,
-        count=count,
-    )
+def _logger():
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("playlist_pilot")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.FileHandler("logs/run.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+    return logger
 
 
-def _resolve_conflicts(request: PlaylistRequest) -> bool:
-    conflicts = find_conflicts(request)
-    if not conflicts:
-        return False
-    print("\nI found a possible conflict:")
-    for conflict in conflicts:
-        print(f"- {conflict}")
-    choice = _ask_choice("Which should take priority?", ["quiz", "notes"], "quiz")
-    return choice == "quiz"
+def _profile_rows(profile):
+    return [
+        {
+            "Preference": key.replace("_", " ").title(),
+            "Value": str(item["value"]),
+            "Source": item["source"],
+            "Confidence": round(item["confidence"], 2),
+        }
+        for key, item in profile.items()
+        if not key.startswith("_")
+    ]
 
 
-def _print_playlist(result, explanations) -> None:
-    print(f"\n{result.playlist_name}")
-    print("=" * len(result.playlist_name))
-    print(f"Verifier: {'PASS' if result.verification.passed else 'BEST-EFFORT / ISSUES'}")
-    print(f"Attempts: {result.attempts}/3")
-    for issue in result.verification.issues:
-        print(f"Warning: {issue}")
-    for index, ((song, score, _), explanation) in enumerate(
-        zip(result.recommendations, explanations), start=1
-    ):
-        print(f"\n{index}. {song.get('title')} — {song.get('artist')} ({score:.1f}/100)")
-        print(f"   {explanation}")
+def main():
+    st.set_page_config(page_title="Playlist Pilot", page_icon="🎧", layout="wide")
+    st.title("Playlist Pilot")
+    st.caption("Describe one playlist vibe. The catalog loads only after you submit.")
+    logger = _logger()
 
-
-def _self_test(csv_path: str, language_labels_path: Optional[str], logger: logging.Logger) -> int:
-    songs = load_songs(csv_path, language_labels_path)
-    results = fixed_profile_tests(songs)
-    print(format_test_results(results))
-    verified = sum(bool(result["verified"]) for result in results)
-    deterministic = sum(bool(result["deterministic"]) for result in results)
-    print(f"\nVerifier pass rate: {verified}/{len(results)}")
-    print(f"Repeatability: {deterministic}/{len(results)}")
-    logger.info(
-        "self_test profiles=%d verified=%d deterministic=%d",
-        len(results),
-        verified,
-        deterministic,
-    )
-    return 0 if verified == len(results) and deterministic == len(results) else 1
-
-
-def run_agent(
-    csv_path: str,
-    language_labels_path: Optional[str] = None,
-    export_target: str = "csv",
-    count: int = 10,
-) -> int:
-    logger = configure_logging()
-    try:
-        load_dotenv()
-        songs = load_songs(csv_path, language_labels_path)
-        logger.info("catalog_loaded path=%s songs=%d", csv_path, len(songs))
-        llm = make_llm_client(logger)
-        request = _collect_request(songs, count)
-        ignore_note_energy = _resolve_conflicts(request)
-
-        note_preferences: Dict = parse_notes_keywords(request.notes)
-        llm_preferences = llm_note_preferences(request.notes, llm, logger)
-        note_preferences.update(llm_preferences)
-
-        agent = PlaylistAgent(songs, logger)
-        result = agent.create(
-            request,
-            notes_preferences=note_preferences,
-            ignore_note_energy=ignore_note_energy,
+    with st.form("vibe_form"):
+        sentence = st.text_area(
+            "What should this playlist feel like?",
+            max_chars=200,
+            placeholder="Rainy-day studying, sad but not slow, early 2000s R&B",
         )
-        try:
-            ai_explanation = llm.explain(result)
-        except LLMError as error:
-            logger.warning("%s Falling back to deterministic explanations.", error)
-            print(f"{error} Falling back to deterministic explanations.")
-            ai_explanation = None
-        if ai_explanation:
-            result.playlist_name = ai_explanation["playlist_name"]
-            explanations = ai_explanation["reasons"]
+        submitted = st.form_submit_button("Build my profile", type="primary")
+    if submitted:
+        sentence = sanitize(sentence)
+        if not sentence:
+            st.error("Enter a short description first.")
         else:
-            explanations = explain_playlist(result)
-        _print_playlist(result, explanations)
-
-        approval = _ask_choice(
-            "Approve this playlist for export?", ["yes", "no"], "no"
-        )
-        if approval != "yes":
-            logger.info("playlist_export_declined")
-            print("Nothing was exported.")
-            return 0
-
-        export_csv(result, "playlist.csv")
-        logger.info("csv_exported path=playlist.csv")
-        print("Saved playlist.csv with Spotify search links.")
-        if export_target == "spotify":
             try:
-                spotify_url = make_spotify_exporter().export(result)
-            except SpotifyExportError as error:
-                logger.error("Spotify export failed: %s", error)
-                print(f"Spotify export failed: {error}")
-                print("The approved CSV and search links are available as playlist.csv.")
+                with st.spinner("Loading the Billboard catalog and reading your request..."):
+                    songs = _catalog()
+                    profile = build_profile(sentence, genre_vocabulary(songs), logger)
+            except (OSError, ValueError, RuntimeError) as error:
+                logger.error("profile_setup_failed error_type=%s", type(error).__name__)
+                st.error(f"Could not prepare the request: {error}")
             else:
-                logger.info("spotify_exported url=%s", spotify_url)
-                print(f"Created Spotify playlist: {spotify_url}")
-        return 0
-    except (LLMError, ValueError, OSError) as error:
-        logger.error("playlist_run_failed: %s", error)
-        print(f"Could not create playlist: {error}")
-        return 1
+                st.session_state["profile"] = profile
+                st.session_state["followups"] = 0
+                st.session_state["asked"] = []
+                st.session_state.pop("playlist", None)
+                st.session_state.pop("approved", None)
+                st.session_state.pop("spotify_url", None)
 
+    profile = st.session_state.get("profile")
+    if not profile:
+        return
 
-def _default_catalog() -> str:
-    if Path("data/spotify_songs.csv").is_file():
-        return "data/spotify_songs.csv"
-    return "data/songs.csv"
+    uncertain = [
+        key for key in ("mood", "era", "setting")
+        if profile[key]["confidence"] < .6 and key not in st.session_state["asked"]
+    ]
+    if uncertain and st.session_state["followups"] < 2:
+        key = min(uncertain, key=lambda item: profile[item]["confidence"])
+        questions = {
+            "mood": "Which mood is closest?",
+            "era": "Which chart-debut era do you mean?",
+            "setting": "Where will you listen?",
+        }
+        with st.form("followup_form"):
+            answer = st.selectbox(questions[key], FOLLOWUP_CHOICES[key])
+            answered = st.form_submit_button("Use this answer")
+        if answered:
+            resolve_followup(profile, key, answer)
+            st.session_state["asked"].append(key)
+            st.session_state["followups"] += 1
+            st.session_state["profile"] = profile
+            st.rerun()
+        return
+    elif any(profile[key]["confidence"] < .6 for key in ("mood", "era", "setting")):
+        st.session_state["profile"] = fill_defaults(profile)
+        profile = st.session_state["profile"]
 
+    st.subheader("Confirm your profile")
+    st.dataframe(_profile_rows(profile), hide_index=True, use_container_width=True)
+    for assumption in profile.get("_meta", {}).get("assumptions", []):
+        st.info("Assumption: " + assumption)
+    st.caption(f"Parse confidence: {parse_confidence(profile):.2f}")
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Build and verify a personalized playlist.")
-    parser.add_argument("--csv", default=_default_catalog(), help="song catalog CSV")
-    parser.add_argument(
-        "--language-labels",
-        default=None,
-        help="optional CSV with track_id,language columns for manual language labels",
+    st.checkbox("Also create a private Spotify playlist", key="also_spotify")
+    if st.button("Confirm profile and build playlist", type="primary"):
+        try:
+            with st.spinner("Scoring, verifying, and adjusting playlist length..."):
+                result = build_playlist(_catalog(), profile, logger)
+            st.session_state["playlist"] = result
+            st.session_state["approved"] = False
+            st.session_state.pop("spotify_url", None)
+            st.session_state["csv_data"] = csv_bytes(result["tracks"])
+        except (OSError, ValueError, RuntimeError) as error:
+            logger.error("playlist_build_failed error_type=%s", type(error).__name__)
+            st.error(f"Could not build the playlist: {error}")
+
+    result = st.session_state.get("playlist")
+    if not result:
+        return
+    st.subheader("Playlist")
+    st.metric("Playlist confidence", f"{result['confidence']:.2f}", result["label"])
+    st.metric(
+        "Duration",
+        f"{sum(song['duration_ms'] for song in result['tracks']) / 60000:.1f} min",
+        f"target {profile['length_minutes']['value']} min",
     )
-    parser.add_argument(
-        "--export",
-        choices=("csv", "spotify"),
-        default="csv",
-        help="export locally or also create a Spotify playlist after approval",
+    st.caption(f"Verified after {result['attempts']} attempt(s).")
+    for issue in result["issues"]:
+        st.warning(issue)
+    st.dataframe(
+        [
+            {
+                "Song": song["title"], "Performer": song["artist"],
+                "Score": song["score"], "Reason": song["breakdown"],
+            }
+            for song in result["tracks"]
+        ],
+        hide_index=True,
+        use_container_width=True,
     )
-    parser.add_argument("--count", type=int, default=10, help="playlist size from 1 to 50")
-    parser.add_argument(
-        "--self-test",
-        action="store_true",
-        help="run deterministic reliability profiles without calling Gemini",
-    )
-    arguments = parser.parse_args()
-    logger = configure_logging()
-    try:
-        if arguments.self_test:
-            return _self_test(arguments.csv, arguments.language_labels, logger)
-        if not 1 <= arguments.count <= 50:
-            parser.error("--count must be between 1 and 50")
-        return run_agent(
-            arguments.csv,
-            arguments.language_labels,
-            arguments.export,
-            arguments.count,
+    if st.button("Approve and export", disabled=st.session_state.get("approved", False)):
+        try:
+            data = csv_bytes(result["tracks"])
+            Path("playlist.csv").write_bytes(data)
+            st.session_state["csv_data"] = data
+            st.session_state["approved"] = True
+        except OSError as error:
+            logger.error("csv_export_failed error_type=%s", type(error).__name__)
+            st.error(f"Could not save playlist.csv: {error}")
+        if st.session_state.get("approved") and st.session_state.get("also_spotify"):
+            try:
+                with st.spinner("Creating your private Spotify playlist..."):
+                    st.session_state["spotify_url"] = export_spotify(
+                        result["tracks"], "Playlist Pilot"
+                    )
+            except RuntimeError as error:
+                logger.error("spotify_export_failed error_type=%s", type(error).__name__)
+                st.error(f"Spotify export failed; the CSV is still available: {error}")
+    if st.session_state.get("approved"):
+        st.download_button(
+            "Download playlist.csv",
+            st.session_state["csv_data"],
+            file_name="playlist.csv",
+            mime="text/csv",
         )
-    except (OSError, ValueError) as error:
-        logger.error("application_failed: %s", error)
-        print(f"Could not run Playlist Pilot: {error}")
-        return 1
+        if st.session_state.get("spotify_url"):
+            st.link_button("Open Spotify playlist", st.session_state["spotify_url"])
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
